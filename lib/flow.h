@@ -141,7 +141,7 @@ BUILD_ASSERT_DECL(offsetof(struct flow, tp_dst) + 2
  * segments.
  * This is located here since this is dependent on the structure of the
  * struct flow defined above:
- * Each offset must be on a distint, successive U32 boundary srtictly
+ * Each offset must be on a distinct, successive U32 boundary strictly
  * within the struct flow. */
 enum {
     FLOW_SEGMENT_1_ENDS_AT = offsetof(struct flow, dl_src),
@@ -265,6 +265,7 @@ hash_odp_port(odp_port_t odp_port)
 
 uint32_t flow_hash_in_minimask(const struct flow *, const struct minimask *,
                                uint32_t basis);
+
 uint32_t flow_hash_in_minimask_range(const struct flow *,
                                      const struct minimask *,
                                      uint8_t start, uint8_t end,
@@ -363,6 +364,10 @@ struct miniflow {
     uint32_t *values;
     uint32_t inline_values[MINI_N_INLINE];
 };
+
+void flow_wildcards_intersect_xor_miniflow(struct flow_wildcards *,
+                                           const struct flow *,
+                                           const struct miniflow *);
 
 void miniflow_init(struct miniflow *, const struct flow *);
 void miniflow_init_with_minimask(struct miniflow *, const struct flow *,

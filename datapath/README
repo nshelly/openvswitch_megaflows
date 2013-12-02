@@ -102,7 +102,7 @@ A wildcarded flow can represent a group of exact match flows. Each '1' bit
 in the mask specifies a exact match with the corresponding bit in the flow key.
 A '0' bit specifies a don't care bit, which will match either a '1' or '0' bit
 of a incoming packet. Using wildcarded flow can improve the flow set up rate
-by reduce the number of new flows need to be processed by the user space program.
+by reducing the number of new flows need to be processed by the user space program.
 
 Support for the mask Netlink attribute is optional for both the kernel and user
 space program. The kernel can ignore the mask attribute, installing an exact
@@ -194,7 +194,7 @@ simple Ethernet switch that forwards every packet.
 
 Instead, in such a case, include an attribute with "empty" content.
 It doesn't matter if the empty content could be valid protocol values,
-as long as those values are rarely seen in practice, because userspace
+as long as those values are rarely seen in practice, because the kernel
 can always forward all packets with those values to userspace and
 handle them individually.
 

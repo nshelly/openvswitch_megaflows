@@ -59,8 +59,8 @@ struct OVS_LOCKABLE group_dpif;
  *   to install a kernel flow.
  *
  * - ofproto-dpif-xlate.c
- *   Ofproto-dpif-xlate is responsible for translating translating OpenFlow
- *   actions into datapath actions. */
+ *   Ofproto-dpif-xlate is responsible for translating OpenFlow actions into
+ *   datapath actions. */
 
 void rule_dpif_lookup(struct ofproto_dpif *, const struct flow *,
                       struct flow_wildcards *, struct rule_dpif **rule);

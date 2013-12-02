@@ -686,6 +686,28 @@ flow_wildcards_fold_minimask(struct flow_wildcards *wc,
     flow_union_with_miniflow(&wc->masks, &mask->masks);
 }
 
+/* Determine the bits different between a flow 'flow' and a rule's
+ * 'match', and intersect with the 'diff_wc' wildcard mask.
+ *
+ * For header space analysis (HSA), 'diff_wc' keeps track of all
+ * bits that are unique to the packet, and different than all
+ * the rules, in order to install the most general datapath rule possible.*/
+void
+flow_wildcards_intersect_xor_miniflow(struct flow_wildcards *diff_wc,
+                                      const struct flow *flow,
+                                      const struct miniflow *match)
+{
+    uint32_t *dst_u32 = (uint32_t *) &diff_wc->masks;
+    const uint32_t *src_flow_u32 = (uint32_t *) flow;
+    const uint32_t *p_match = match->values;
+    uint64_t map;
+
+    /* Determine which fields are unequal and intersect. */
+    for (map = match->map; map; map = zero_rightmost_1bit(map)) {
+        dst_u32[raw_ctz(map)] &= src_flow_u32[raw_ctz(map)] ^ *p_match++;
+    }
+}
+
 inline uint64_t
 miniflow_get_map_in_range(const struct miniflow *miniflow,
                           uint8_t start, uint8_t end, const uint32_t **data)

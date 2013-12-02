@@ -347,7 +347,7 @@ rightmost_1bit_idx(uint32_t x)
     return x ? ctz(x) : 32;
 }
 
-/* Returns the index of the rightmost 1-bit in 'x' (e.g. 01011000 => 6), or 32
+/* Returns the index of the leftmost 1-bit in 'x' (e.g. 01011000 => 6), or 32
  * if 'x' is 0.
  *
  * This function only works with 32-bit integers. */

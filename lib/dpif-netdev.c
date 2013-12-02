@@ -755,7 +755,7 @@ dp_netdev_lookup_flow(const struct dp_netdev *dp, const struct flow *flow)
     struct cls_rule *cr;
 
     ovs_rwlock_wrlock(&dp->cls.rwlock);
-    cr = classifier_lookup(&dp->cls, flow, NULL);
+    cr = classifier_lookup(&dp->cls, flow, NULL, HSA_ENABLED);
     ovs_rwlock_unlock(&dp->cls.rwlock);
 
     return (cr

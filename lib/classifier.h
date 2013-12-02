@@ -132,6 +132,12 @@ extern struct ovs_mutex ofproto_mutex;
 /* Maximum number of staged lookup indices for each subtable. */
 enum { CLS_MAX_INDICES = 3 };
 
+/* Option to use header space analysis for flow classification. */
+#define HSA_ENABLED true
+
+/* Level after which HSA logic is applied (high entropy levels). */
+#define HSA_ENTROPY_CUTOFF 3
+
 /* A flow classifier. */
 struct classifier {
     int n_rules;                /* Total number of rules. */
@@ -223,7 +229,7 @@ void classifier_remove(struct classifier *cls, struct cls_rule *)
     OVS_REQ_WRLOCK(cls->rwlock);
 struct cls_rule *classifier_lookup(const struct classifier *cls,
                                    const struct flow *,
-                                   struct flow_wildcards *)
+                                   struct flow_wildcards *, bool hsa_enabled)
     OVS_REQ_RDLOCK(cls->rwlock);
 bool classifier_rule_overlaps(const struct classifier *cls,
                               const struct cls_rule *)

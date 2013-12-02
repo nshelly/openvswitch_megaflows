@@ -81,6 +81,7 @@ COVERAGE_DEFINE(packet_in_overflow);
 /* Number of implemented OpenFlow tables. */
 enum { N_TABLES = 255 };
 enum { TBL_INTERNAL = N_TABLES - 1 };    /* Used for internal hidden rules. */
+
 BUILD_ASSERT_DECL(N_TABLES >= 2 && N_TABLES <= 255);
 
 struct flow_miss;
@@ -263,7 +264,7 @@ struct facet {
     struct cls_rule cr;         /* In 'ofproto_dpif's facets classifier. */
 
     /* These statistics:
-     *
+    *
      *   - Do include packets and bytes sent "by hand", e.g. with
      *     dpif_execute().
      *
@@ -522,6 +523,11 @@ struct ofproto_dpif {
 /* By default, flows in the datapath are wildcarded (megaflows).  They
  * may be disabled with the "ovs-appctl dpif/disable-megaflows" command. */
 static bool enable_megaflows = true;
+
+/* By default, the classifier uses header space analysis for maximizing 
+ * datapath cache hits.  It can be disabled with the 
+ *  "ovs-appctl dpif/disable-hsa" command. */
+static bool enable_hsa = true;
 
 /* All existing ofproto_dpif instances, indexed by ->up.name. */
 static struct hmap all_ofproto_dpifs = HMAP_INITIALIZER(&all_ofproto_dpifs);
@@ -4055,7 +4061,7 @@ facet_find(struct ofproto_dpif *ofproto, const struct flow *flow)
     struct cls_rule *cr;
 
     ovs_rwlock_rdlock(&ofproto->facets.rwlock);
-    cr = classifier_lookup(&ofproto->facets, flow, NULL);
+    cr = classifier_lookup(&ofproto->facets, flow, NULL, enable_hsa);
     ovs_rwlock_unlock(&ofproto->facets.rwlock);
     return cr ? CONTAINER_OF(cr, struct facet, cr) : NULL;
 }
@@ -4656,12 +4662,12 @@ rule_dpif_lookup_in_table(struct ofproto_dpif *ofproto,
         struct flow ofpc_normal_flow = *flow;
         ofpc_normal_flow.tp_src = htons(0);
         ofpc_normal_flow.tp_dst = htons(0);
-        cls_rule = classifier_lookup(cls, &ofpc_normal_flow, wc);
+        cls_rule = classifier_lookup(cls, &ofpc_normal_flow, wc, enable_hsa);
     } else if (frag && ofproto->up.frag_handling == OFPC_FRAG_DROP) {
         cls_rule = &ofproto->drop_frags_rule->up.cr;
         /* Frag mask in wc already set above. */
     } else {
-        cls_rule = classifier_lookup(cls, flow, wc);
+        cls_rule = classifier_lookup(cls, flow, wc, enable_hsa);
     }
 
     *rule = rule_dpif_cast(rule_from_cls_rule(cls_rule));
@@ -5912,6 +5918,50 @@ ofproto_unixctl_dpif_enable_megaflows(struct unixctl_conn *conn,
     unixctl_command_reply(conn, "megaflows enabled");
 }
 
+/* Disable using header space analysis for flow classification.
+ *
+ * This command is only needed for advanced debugging, so it's not
+ * documented in the man page. */
+static void
+ofproto_unixctl_dpif_disable_hsa(struct unixctl_conn *conn,
+                                 int argc OVS_UNUSED,
+                                 const char *argv[] OVS_UNUSED,
+                                 void *aux OVS_UNUSED)
+{
+    struct ofproto_dpif *ofproto;
+
+    enable_hsa = false;
+
+    HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_node, &all_ofproto_dpifs) {
+        flush(&ofproto->up);
+    }
+
+    unixctl_command_reply(conn, "hsa flow classification disabled");
+}
+
+/* Re-enable using header space analysis for flow classification.
+ *
+ * This command is only needed for advanced debugging, so it's not
+ * documented in the man page. */
+static void
+ofproto_unixctl_dpif_enable_hsa(struct unixctl_conn *conn,
+                                int argc OVS_UNUSED,
+                                const char *argv[] OVS_UNUSED,
+                                void *aux OVS_UNUSED)
+{
+    struct ofproto_dpif *ofproto;
+
+    enable_hsa = true;
+
+    HMAP_FOR_EACH (ofproto, all_ofproto_dpifs_node, &all_ofproto_dpifs) {
+        flush(&ofproto->up);
+    }
+
+    unixctl_command_reply(conn, "hsa flow classification enabled");
+}
+
+
+
 static void
 ofproto_unixctl_dpif_dump_flows(struct unixctl_conn *conn,
                                 int argc OVS_UNUSED, const char *argv[],
@@ -6038,6 +6088,10 @@ ofproto_dpif_unixctl_init(void)
                              ofproto_unixctl_dpif_disable_megaflows, NULL);
     unixctl_command_register("dpif/enable-megaflows", "", 0, 0,
                              ofproto_unixctl_dpif_enable_megaflows, NULL);
+    unixctl_command_register("dpif/disable-hsa", "", 0, 0,
+                             ofproto_unixctl_dpif_disable_hsa, NULL);
+    unixctl_command_register("dpif/enable-hsa", "", 0, 0,
+                             ofproto_unixctl_dpif_enable_hsa, NULL);
 }
 
 /* Linux VLAN device support (e.g. "eth0.10" for VLAN 10.)
