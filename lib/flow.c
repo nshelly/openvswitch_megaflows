@@ -41,6 +41,8 @@
 COVERAGE_DEFINE(flow_extract);
 COVERAGE_DEFINE(miniflow_malloc);
 
+VLOG_DEFINE_THIS_MODULE(flow);
+
 /* U32 indices for segmented flow classification. */
 const uint8_t flow_segment_u32s[4] = {
     FLOW_SEGMENT_1_ENDS_AT / 4,
@@ -693,18 +695,46 @@ flow_wildcards_fold_minimask(struct flow_wildcards *wc,
  * bits that are unique to the packet, and different than all
  * the rules, in order to install the most general datapath rule possible.*/
 void
-flow_wildcards_intersect_xor_miniflow(struct flow_wildcards *diff_wc,
-                                      const struct flow *flow,
-                                      const struct miniflow *match)
+flow_wildcards_intersect_xor_minimatch(struct flow_wildcards *wc,
+                                       struct flow_wildcards *diff_wc,
+                                       const struct flow *flow,
+                                       const struct minimatch *match,
+                                       uint8_t hsa_offset)
 {
+    uint32_t *wc_u32 = (uint32_t *) &wc->masks;
     uint32_t *dst_u32 = (uint32_t *) &diff_wc->masks;
-    const uint32_t *src_flow_u32 = (uint32_t *) flow;
-    const uint32_t *p_match = match->values;
-    uint64_t map;
+    const uint32_t *flow_u32 = (uint32_t *) flow;
+    uint32_t new_bits;
 
-    /* Determine which fields are unequal and intersect. */
-    for (map = match->map; map; map = zero_rightmost_1bit(map)) {
-        dst_u32[raw_ctz(map)] &= src_flow_u32[raw_ctz(map)] ^ *p_match++;
+    const uint32_t *p_match, *p_mask;
+
+    /* Get map of values only of high entropy fields. */
+    uint64_t map = miniflow_get_map_in_range(&match->flow, hsa_offset, 
+                                             FLOW_U32S, &p_match);
+    miniflow_get_map_in_range(&match->mask.masks, hsa_offset, 
+                              FLOW_U32S, &p_mask);
+
+    /* Determine which fields the rule corresponds to and XOR with flow. */
+    for (; map; map = zero_rightmost_1bit(map)) {
+
+        /* If the mask is not set, set the diff wc bit to 1. */
+        new_bits = *p_mask & ~(wc_u32[raw_ctz(map)]);
+        if (new_bits) {
+            VLOG_DBG("Setting map=%u, wc mask=0x%x, rule mask=0x%x, "
+                      "new_bits=0x%x", raw_ctz(map), wc_u32[raw_ctz(map)],
+                      *p_mask, new_bits);
+            dst_u32[raw_ctz(map)] |= new_bits;
+            VLOG_DBG("after: dst_u32=0x%x", dst_u32[raw_ctz(map)]);
+        }
+        wc_u32[raw_ctz(map)] |= *p_mask;
+        p_mask++;
+
+        VLOG_DBG("flow=0x%x ^ rule=0x%x = dst_u32=x%x", flow_u32[raw_ctz(map)], 
+                  *p_match, flow_u32[raw_ctz(map)] ^ *p_match);
+
+        /* The diff wc is 1 if the field's value is unique to the flow. */
+        dst_u32[raw_ctz(map)] &= flow_u32[raw_ctz(map)] ^ *p_match++;
+        VLOG_DBG("dst_u32=0x%x", dst_u32[raw_ctz(map)]);
     }
 }
 

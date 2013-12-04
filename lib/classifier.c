@@ -47,11 +47,15 @@ static void update_subtables_after_removal(struct classifier *,
 
 static struct cls_rule *find_match_wc(const struct cls_subtable *,
                                       const struct flow *,
-                                      struct flow_wildcards *, bool hsa_enabled);
+                                      struct flow_wildcards *,
+                                      struct match *);
 static struct cls_rule *find_equal(struct cls_subtable *,
                                    const struct miniflow *, uint32_t hash);
 static struct cls_rule *insert_rule(struct classifier *,
                                     struct cls_subtable *, struct cls_rule *);
+
+void flow_wildcards_fold_field(unsigned int *wc_field, unsigned int value,
+                               uint8_t len);
 
 /* Iterates RULE over HEAD and all of the cls_rules on HEAD->list. */
 #define FOR_EACH_RULE_IN_LIST(RULE, HEAD)                               \
@@ -350,6 +354,36 @@ classifier_remove(struct classifier *cls, struct cls_rule *rule)
     cls->n_rules--;
 }
 
+void 
+flow_wildcards_fold_field(unsigned int *wc_field, unsigned int value,
+                          uint8_t len)
+{
+    unsigned int msb = 0, wc_value = 0;
+
+    if (value) {
+        msb = leftmost_1bit_idx(value);
+        VLOG_DBG("hsa field: value=0x%X, msb=%d", value, msb);
+        wc_value |= 1 << msb;
+        
+        /* Convert to network format. */
+        //while (len > 0) {
+        //    *wc_field |= wc_value & 0xff;
+        //    wc_field <<= 8;
+        //    tp_port_wc >>= 8;
+        //    len--;
+        //}
+        if (len == 1) {
+            *wc_field = (uint8_t) wc_value;
+        }
+        else if (len == 2) {
+            *wc_field = (ovs_be16) htons(wc_value);
+        }
+        else if (len == 4) {
+            *wc_field = (ovs_be32) htonl(wc_value);
+        }
+    }
+}
+
 /* Finds and returns the highest-priority rule in 'cls' that matches 'flow'.
  * Returns a null pointer if no rules in 'cls' match 'flow'.  If multiple rules
  * of equal priority match 'flow', returns one arbitrarily.
@@ -358,8 +392,8 @@ classifier_remove(struct classifier *cls, struct cls_rule *rule)
  * set of bits that were significant in the lookup.  At some point
  * earlier, 'wc' should have been initialized (e.g., by
  * flow_wildcards_init_catchall()).
- * If 'hsa_enabled' is true, the classifier will return a more general rule
- * to maximize datapath cache hits. */
+ * If 'hsa_enabled' is true, the classifier will use wildcards for a 
+ * more general rule to maximize datapath cache hits. */
 
 struct cls_rule *
 classifier_lookup(const struct classifier *cls, const struct flow *flow,
@@ -369,6 +403,9 @@ classifier_lookup(const struct classifier *cls, const struct flow *flow,
     struct cls_subtable *subtable;
     struct cls_rule *best;
     tag_type tags;
+
+    struct match hsa_diff;
+    match_init_catchall(&hsa_diff);
 
     /* Determine 'tags' such that, if 'subtable->tag' doesn't intersect them,
      * then 'flow' cannot possibly match in 'subtable':
@@ -402,40 +439,36 @@ classifier_lookup(const struct classifier *cls, const struct flow *flow,
             continue;
         }
 
-        VLOG_INFO("Looking for match with priority subtable, "
-                  "maxpriority=%d, n_rules=%d\n", 
+        VLOG_DBG("Looking for match with subtable: "
+                  "max_priority=%d, n_rules=%d\n", 
                   subtable->max_priority, subtable->n_rules); 
 
-        rule = find_match_wc(subtable, flow, wc, hsa_enabled);
-        //if (rule) {
-        //    cls_rule_format(rule, &ds);
-        //    VLOG_INFO("Found rule that matches: %s\n", ds_cstr(&ds));
-        //}
-        //match_init(&match, flow, wc);
-        //VLOG_INFO("Found rule with match: relevant wc=%s!\n",
-        //           match_to_string(&match, subtable->max_priority));
+        VLOG_DBG("HSA Enabled? %s", hsa_enabled ? "YES": "NO");
+        rule = find_match_wc(subtable, flow, wc, 
+                             hsa_enabled ? &hsa_diff : NULL);
 
         if (rule) {
             best = rule;
-            VLOG_INFO("Found rule, continuing with subtable search\n");
+            VLOG_DBG("Found rule, continuing with subtable search\n");
 
             LIST_FOR_EACH_CONTINUE (subtable, list_node,
                                     &cls->subtables_priority) {
 
-                VLOG_INFO("Looking for higher priority rule, at %d\n", 
+                VLOG_DBG("Looking for higher priority rule, at %d\n", 
                           subtable->max_priority);
 
                 if (subtable->max_priority <= best->priority) {
                     /* Subtables are in descending priority order,
                      * can not find anything better. */
-                    return best;
+                    goto out;
                 }
                 if (!tag_intersects(tags, subtable->tag)) {
                     continue;
                 }
 
 
-                rule = find_match_wc(subtable, flow, wc, hsa_enabled);
+                rule = find_match_wc(subtable, flow, wc, 
+                                     hsa_enabled ? &hsa_diff : NULL);
                 if (rule && rule->priority > best->priority) {
                     best = rule;
                 }
@@ -443,6 +476,26 @@ classifier_lookup(const struct classifier *cls, const struct flow *flow,
             break;
         }
     }
+
+out:
+    /* Fold only most significant bit of flow that differs from rules. In a 
+     * general HSA solution, one could add datapath flows for each bit that 
+     * differs from the rules. */ 
+    if (hsa_enabled) {
+        if (HSA_ENTROPY_CUTOFF == 3) {
+          
+            /* Fold the most significant bit of all high entropy (L4) fields, 
+             * that differ from all other rules, into the wildcards. */
+            VLOG_DBG("hsa_diff: tp_src:");
+            flow_wildcards_fold_field((unsigned int*) &wc->masks.tp_src, 
+                                      ntohs(hsa_diff.wc.masks.tp_src), 2); 
+
+            VLOG_DBG("hsa_diff: tp_dst:");
+            flow_wildcards_fold_field((unsigned int*) &wc->masks.tp_dst, 
+                                      ntohs(hsa_diff.wc.masks.tp_dst), 2); 
+        }
+    }
+
     return best;
 }
 
@@ -846,39 +899,48 @@ update_subtables_after_removal(struct classifier *cls,
     }
 }
 
-/* TODO: Subtract off higher rules for HSA */
+/* Subtract off higher rules for HSA. The match "hsa_diff" maintains
+   the flow's unique bits (that do not match higher priority rules). */
 static inline struct cls_rule *
 find_match(const struct cls_subtable *subtable, const struct flow *flow,
-           uint32_t hash, struct flow_wildcards *diff_wc)
+           uint32_t hash, struct flow_wildcards *wc,
+           struct match *hsa_diff, uint8_t hsa_offset)
 {
     struct cls_rule *rule;
-    struct match match;
+    struct match match_diff, match_wc;
 
-    if (diff_wc) {
-        VLOG_INFO("Finding relevant wc's for flow=%s\n", flow_to_string(flow));
+    if (wc && hsa_diff) {
+        VLOG_DBG("Finding relevant wc's for flow=%s\n", flow_to_string(flow));
      
         /* Subtract off other rules, or for a more approximate HSA solution, 
          * take the intersection of the XOR's of the flow and each differing 
          * rule in the subtable. */
-        match_init(&match, flow, diff_wc);
-        VLOG_INFO("Before XOR and intersection, diff_wc=%s\n",
-                  match_to_string(&match, subtable->max_priority));
+        match_init(&match_diff, flow, &hsa_diff->wc);
+        match_init(&match_wc, flow, wc);
+        VLOG_DBG("Before XOR and intersection, wc=%s, hsa_diff->wc=%s\n",
+                  match_to_string(&match_wc, subtable->max_priority),
+                  match_to_string(&match_diff, subtable->max_priority));
         HMAP_FOR_EACH (rule, hmap_node, &subtable->rules) {
             /* GET RULE MATCH HERE */
-            VLOG_INFO("Checking rule match=%s\n",
+            VLOG_DBG("Checking rule match=%s\n",
                        minimatch_to_string(&rule->match, rule->priority));
 
             if (!minimatch_matches_flow(&rule->match, flow)) {
-                VLOG_INFO("No match! Subtract off rule match=%s\n",
+                VLOG_DBG("No match! Subtract off rule match=%s\n",
                            minimatch_to_string(&rule->match, rule->priority));
                 /* Keep a running list of fields for which flow differs from 
-                 * all the rules. */
-                flow_wildcards_intersect_xor_miniflow(diff_wc, flow, 
-                                                      &rule->match.flow);
+                 * all the higher priority rules. */
+                flow_wildcards_intersect_xor_minimatch(wc, &hsa_diff->wc, flow,
+                                                       &rule->match, 
+                                                       hsa_offset);
 
-                match_init(&match, flow, diff_wc);
-                VLOG_INFO("After XOR and intersection, diff_wc=%s\n",
-                          match_to_string(&match, subtable->max_priority));
+                match_init(&match_diff, flow, &hsa_diff->wc);
+                match_init(&match_wc, flow, wc);
+                VLOG_DBG("After XOR and intersection, wc=%s, "
+                          "hsa_diff->wc=%s\n",
+                          match_to_string(&match_wc, subtable->max_priority),
+                          match_to_string(&match_diff, 
+                                          subtable->max_priority));
                 
             }
         }
@@ -891,35 +953,38 @@ find_match(const struct cls_subtable *subtable, const struct flow *flow,
         }
     }
 
-    VLOG_INFO("No direct match in this subtable!\n");
-
+    VLOG_DBG("No direct match in this subtable!\n");
     return NULL;
 }
 
+/* Find the matching rule and update the flow wildcards "wc", if "wc" is not
+ * NULL.  
+ * If the match "hsa_diff" is not NULL, store 1 for all values which do not 
+ * match on higher priority fields, generally unique high entropy values on
+ * L4 and above which do not match on higher priority rules. */
 static struct cls_rule *
 find_match_wc(const struct cls_subtable *subtable, const struct flow *flow,
-              struct flow_wildcards * wc, bool hsa_enabled)
+              struct flow_wildcards *wc, struct match *hsa_diff)
 {
     uint32_t basis = 0, hash;
     struct cls_rule *rule = NULL;
     uint8_t prev_u32ofs = 0;
+    uint8_t hsa_u32ofs = subtable->index_ofs[HSA_ENTROPY_CUTOFF-1];
     int i;
 
     struct match match;
-    struct flow_wildcards diff_wc;
-    uint16_t tp_port_wc, msb_tp_src, msb_tp_dst;
+    struct match match_diff, match_wc;
   
-    flow_wildcards_init_catchall(&diff_wc);
-
     if (!wc) {
         return find_match(subtable, flow,
                           flow_hash_in_minimask(flow, &subtable->mask, 0), 
-                          NULL);
+                          NULL, NULL, 0);
     }
 
     /* Try to finish early by checking fields in segments. */
     for (i = 0; i < subtable->n_indices; i++) {
         struct hindex_node *inode;
+        VLOG_DBG("Checking index %d", i);
 
         hash = flow_hash_in_minimask_range(flow, &subtable->mask, prev_u32ofs,
                                            subtable->index_ofs[i], &basis);
@@ -930,7 +995,6 @@ find_match_wc(const struct cls_subtable *subtable, const struct flow *flow,
              * covered so far. */
             flow_wildcards_fold_minimask_range(wc, &subtable->mask, 0,
                                                prev_u32ofs);
-            
             return NULL;
         }
 
@@ -949,128 +1013,65 @@ find_match_wc(const struct cls_subtable *subtable, const struct flow *flow,
         if (!inode->s && !rule) {
             ASSIGN_CONTAINER(rule, inode - i, index_nodes);
             if (minimatch_matches_flow(&rule->match, flow)) {
-
-                flow_wildcards_fold_minimask(wc, &subtable->mask);
+                VLOG_DBG("Single rule that matches flow: %s",
+                          minimatch_to_string(&rule->match, rule->priority));
                 goto out;
             }
         }
     }
 
     if (!rule) {
-
         /* Multiple potential matches exist, look for one. */
         hash = flow_hash_in_minimask_range(flow, &subtable->mask, prev_u32ofs,
                                            FLOW_U32S, &basis);
  
-        /* Subtract off higher priority header spaces (HSA). */
-        /* Set all 1's for the match field (different from matching rule). */
-        flow_wildcards_fold_minimask(&diff_wc, &subtable->mask);
-        match_init(&match, flow, &diff_wc);
-        VLOG_INFO("Checking multiple matches index=%d, index_ofs=%d, "
-                  "diff_wc=%s, wc=%s!, diff_match=%s\n", i, prev_u32ofs,
-                  flow_to_string(&diff_wc.masks), 
-                  flow_to_string(&wc->masks), 
-                  match_to_string(&match, subtable->max_priority));
+        if (hsa_diff && i >= HSA_ENTROPY_CUTOFF) {
+            /* Subtract off higher priority header spaces (HSA) by 
+             * setting all 1's for the match field (different from matching 
+             * rule). */
+            match_init(&match, flow, &hsa_diff->wc);
+            VLOG_DBG("Checking multiple matches index=%d, index_ofs=%d, "
+                      "flow match=%s\n", i, hsa_u32ofs,
+                      match_to_string(&match, subtable->max_priority));
+            rule = find_match(subtable, flow, hash, wc, hsa_diff, hsa_u32ofs);
+        }
+        else {
+            rule = find_match(subtable, flow, hash, NULL, NULL, 0);
+        }
 
-        rule = find_match(subtable, flow, hash, &diff_wc);
     } else {
         /* We already narrowed the matching candidates down to just 'rule',
          * but it didn't match. */
+
+        if (hsa_diff) {
+            VLOG_DBG("Getting different wc for rule=%s\n",
+                       minimatch_to_string(&rule->match, rule->priority));
+
+            match_init(&match_wc, flow, wc);
+            match_init(&match_diff, flow, &hsa_diff->wc);
+            VLOG_DBG("Before XOR and intersection, wc=%s, hsa_diff->wc=%s\n",
+                      match_to_string(&match_wc, subtable->max_priority),
+                      match_to_string(&match_diff, subtable->max_priority));
+
+            /* Fold differing high entropy fields of flow into hsa_diff. */
+            flow_wildcards_intersect_xor_minimatch(wc, &hsa_diff->wc, flow, 
+                                                   &rule->match, hsa_u32ofs);
+
+            match_init(&match_wc, flow, wc);
+            match_init(&match_diff, flow, &hsa_diff->wc);
+            VLOG_DBG("After XOR and intersection, wc=%s, hsa_diff->wc=%s\n",
+                      match_to_string(&match_wc, subtable->max_priority),
+                      match_to_string(&match_diff, subtable->max_priority));
+        }
         rule = NULL;
     }
  out:
-    /* HSA: Now that we have wc, determine a more general rule (for now taking
-            most significant bit that differs)
-            For example, if the higher priority rule matches on 
-            tp_port=80 
-            flow is 65530 (0xfffa), then the full HSA is tcp_port=xxxx-80
-            we return wc tp_port=0b1xxx xxxx xxxx xxxx, although a more general 
-            solution would install k rules where there are k differing bits. */
-
-    //flow_wildcards_fold_minimask(wc, &subtable->mask);
-
-    /* Fold low entropy fields into wildcard (generally L1 through L3). */
-
-    //prev_u32ofs = subtable->index_ofs[i];
-
-    /* Fold only most significant bit of flow that differs from rules. In a 
-     * general HSA solution, one could add datapath flows for each bit that 
-     * differs from the rules. */ 
-    if (hsa_enabled && i == HSA_ENTROPY_CUTOFF) {
-
-        VLOG_INFO("Folding in up to Layer %d, bit offset=%d", i, prev_u32ofs);
-        flow_wildcards_fold_minimask_range(wc, &subtable->mask, 0,
-                                           prev_u32ofs);
-
-        match_init(&match, flow, &diff_wc);
-        /* Union diff_wc with the other wc. */
-        //first_diff = leftmost_1bit_idx((uint64_t) &diff_wc.masks);
-        VLOG_INFO("Before diff_wc=%s", 
-                  match_to_string(&match, subtable->max_priority));
- 
-        if (HSA_ENTROPY_CUTOFF == 3) {
-          
-            /* Fold the most significant bit of all high entropy (L4) fields, 
-             * that differ from all other rules, into the wildcards. */
-            ovs_assert(diff_wc.masks.tp_src || diff_wc.masks.tp_dst);
-          
-            msb_tp_src = (!diff_wc.masks.tp_src) ? 0 :
-                         leftmost_1bit_idx(ntohs(diff_wc.masks.tp_src));
-            msb_tp_dst = (!diff_wc.masks.tp_dst) ? 0 :
-                         leftmost_1bit_idx(ntohs(diff_wc.masks.tp_dst));
-          
-            VLOG_INFO("diff_tp_src=0x%X, msb_tp_src=%d, "
-                      "diff_tp_dst=0x%X, msb_tp_dst=%d",
-                      ntohs(diff_wc.masks.tp_src), msb_tp_src,
-                      ntohs(diff_wc.masks.tp_dst), msb_tp_dst);
-                      
-            if (msb_tp_dst > msb_tp_src) {
-                tp_port_wc = ntohs(wc->masks.tp_dst);
-                tp_port_wc |= 1 << msb_tp_dst;
-                wc->masks.tp_dst = htons(tp_port_wc);
-                VLOG_INFO("Folding in msb different, tp_dst<=0x%X.",
-                           tp_port_wc);
-            }
-            else {
-                tp_port_wc = wc->masks.tp_src;
-                VLOG_INFO("Before folding in msb different, tp_src<=0x%X",
-                          tp_port_wc);
-
-                tp_port_wc |= (1 << msb_tp_src);
-                VLOG_INFO("Folding in msb different, tp_src<=0x%X, should be 0x%X.",
-                           tp_port_wc, 1 << msb_tp_src);
-                wc->masks.tp_src = htons(tp_port_wc);
-                VLOG_INFO("Folded in msb different, tp_src<=0x%X.",
-                          tp_port_wc);
-
-            }
-        }
-        else {
-
-//            wc_u32 = (uint32_t *) &wc->masks;
-//            diff_u32 = (const uint32_t *) &diff_wc.masks;
-//            for (i = prev_u32ofs; i < FLOW_U32S; i++) {
-//                if (diff_u32[i]) {
-//                    first_diff = rightmost_1bit_idx(diff_u32[i]);
-//                    VLOG_INFO("Set BEFORE wc byte=%d, wc_value=%X (%d)"
-//                              " size=%ld, diff_value=0x%X, first_bit=%d to 1",
-//                               i, wc_u32[i], wc_u32[i], sizeof diff_u32[i], 
-//                               diff_u32[i], first_diff);
-//                    wc_u32[i] |= 1 << first_diff;
-//                    //bitwise_put(0x1, &(wc_u32[i]), 8, first_diff, 1);
-//                    VLOG_INFO("Set AFTER wc byte=%d, wc_value=0x%X (%d), "
-//                              "bit=%d to 1",
-//                               i, wc_u32[i], wc_u32[i], first_diff);
-//                    break;
-//                }
-        }
+    flow_wildcards_fold_minimask(wc, &subtable->mask);
         
-        match_init(&match, flow, wc);
-        VLOG_INFO("After folding in wc=%s",
-                   match_to_string(&match, subtable->max_priority));
-    }
-    else {
-        flow_wildcards_fold_minimask(wc, &subtable->mask);
+    if (hsa_diff) {
+        match_init(&match, flow, &hsa_diff->wc);
+        VLOG_DBG("After folding in wc=%s",
+                  match_to_string(&match, subtable->max_priority));
     }
 
     return rule;

@@ -31,6 +31,7 @@ struct dpif_flow_stats;
 struct ds;
 struct flow_wildcards;
 struct minimask;
+struct minimatch;
 struct ofpbuf;
 
 /* This sequence number should be incremented whenever anything involving flows
@@ -365,10 +366,11 @@ struct miniflow {
     uint32_t inline_values[MINI_N_INLINE];
 };
 
-void flow_wildcards_intersect_xor_miniflow(struct flow_wildcards *,
-                                           const struct flow *,
-                                           const struct miniflow *);
-
+void flow_wildcards_intersect_xor_minimatch(struct flow_wildcards *,
+                                            struct flow_wildcards *,
+                                            const struct flow *,
+                                            const struct minimatch *,
+                                            uint8_t hsa_offset);
 void miniflow_init(struct miniflow *, const struct flow *);
 void miniflow_init_with_minimask(struct miniflow *, const struct flow *,
                                  const struct minimask *);
@@ -449,3 +451,4 @@ minimask_get_metadata_mask(const struct minimask *mask)
 }
 
 #endif /* flow.h */
+
